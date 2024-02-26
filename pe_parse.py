@@ -1,4 +1,5 @@
 import struct
+from capstone import *
 
 SECTION_HEADER_SIZE = 40
 FILE_HEADER_OFFSET = 4
@@ -7,6 +8,7 @@ HEADER_SIG_SIZE = 4
 E_LFANEW_OFFSET = 0x3c
 OPTIONA_HEADER_OFFSET_SIZE = 16
 COFF_HEADER_SIZE = 20
+ADDRESS_OF_ENTRY_POINT = 20
 
 class PEFormatError(Exception):
     """Exception handler for common PE header errors"""
@@ -19,7 +21,6 @@ class PESectionHeader:
         if self.name[0] not in ['.', '_']:
             raise PEFormatError("Invalid section name")
 
-        print(f'SectionHeaderName: {self.name}')
         """
         typedef struct _IMAGE_SECTION_HEADER {
             BYTE    Name[IMAGE_SIZEOF_SHORT_NAME];
@@ -49,7 +50,6 @@ class PESectionHeader:
             self.number_of_linenumbers,
             self.characteristics
         ) = struct.unpack('<IIIIIIHHI', pe_header_base[SECTION_NAME_SIZE : SECTION_HEADER_SIZE])
-        print("ok")
 
 def log_function_call(func):
     def wrapper(*args, **kwargs):
@@ -83,15 +83,51 @@ class PEParse:
         self.parse_section_headers(self.pe_header)
 
         # List sections
-        self.list_section_info(self.section_headers)
-        
+        self.list_section_info(self.section_headers)        
+
+        # Print assembly 
+        self.print_text_segment_assembly(self.pe_header, self.rawbin, self.section_headers)
         
         return 0  
 
     @log_function_call
+    def print_text_segment_assembly(self, pe_base, raw_bin, segments):
+        """
+        Find .text and print assembly out
+        typedef struct _IMAGE_OPTIONAL_HEADER {
+            //
+            // Standard fields.
+            //
+
+            WORD    Magic;
+            BYTE    MajorLinkerVersion;
+            BYTE    MinorLinkerVersion;
+            DWORD   SizeOfCode;
+            DWORD   SizeOfInitializedData;
+            DWORD   SizeOfUninitializedData;
+            DWORD   AddressOfEntryPoint; 20
+            DWORD   BaseOfCode;
+            DWORD   BaseOfData;
+        ...};        
+        """
+        print(f"PEHeader: {pe_base[:16]}")
+        address_of_entry_point = struct.unpack("<I", pe_base[ADDRESS_OF_ENTRY_POINT : ADDRESS_OF_ENTRY_POINT + 4])[0]
+        print(f'AddressOfEntryPoint: {address_of_entry_point}')
+
+        # This seriously needs to be refactored. 
+        for curr_header in self.section_headers:
+            if curr_header.name == '.text':
+                print(f"Found text segment, size: {curr_header.size_of_raw_data}")
+                text_code_raw = raw_bin[curr_header.pointer_to_raw_data : curr_header.pointer_to_raw_data + curr_header.size_of_raw_data]
+                md = Cs(CS_ARCH_X86, CS_MODE_64)
+                for i in md.disasm(text_code_raw, curr_header.size_of_raw_data):
+                    print(f"0x{i.address:x}:\t{i.mnemonic}\t{i.op_str}")
+
+
+    @log_function_call
     def list_section_info(self, section_headers):
         for curr_section in section_headers:
-            print(f'NAME: {curr_section.name}') 
+            print(f"Name: {curr_section.name}, VirtualSize: {curr_section.virtual_size}, SizeOfRawData: {curr_section.size_of_raw_data}, VirtualAddress: {curr_section.virtual_address}") 
     
     @log_function_call
     def get_number_of_sections(self, pe_header_base) -> int:
@@ -108,6 +144,7 @@ class PEParse:
         """
         num_of_section_offset = FILE_HEADER_OFFSET + 2
 
+        # Need to fix this, properly parse COFF, PE and DOS headers!!!
         num_of_sections = struct.unpack('<H', pe_header_base[num_of_section_offset : num_of_section_offset + 2])[0]
 
         return num_of_sections
@@ -115,8 +152,8 @@ class PEParse:
     @log_function_call
     def parse_section_headers(self, pe_header_base):     
         # Get number of sections
-        num_of_sections = self.get_number_of_sections(pe_header_base)
-        print(f'Total IMAGE_SECTION_HEADER count: {num_of_sections}')
+        self.num_of_sections = self.get_number_of_sections(pe_header_base)
+        print(f'Total IMAGE_SECTION_HEADER count: {self.num_of_sections}')
 
         # Get offset to section headers
         optional_header_size = struct.unpack('<H', pe_header_base[HEADER_SIG_SIZE + OPTIONA_HEADER_OFFSET_SIZE : 4 + 18])[0]
@@ -126,7 +163,7 @@ class PEParse:
         
         self.section_headers = []
         #for i in range(0, len(section_header_raw), SECTION_HEADER_SIZE):
-        for i in range(0, num_of_sections):
+        for i in range(0, self.num_of_sections):
             header_data = section_header_raw[i * SECTION_HEADER_SIZE : i * SECTION_HEADER_SIZE + SECTION_HEADER_SIZE]
             curr_header = PESectionHeader(header_data)
             self.section_headers.append(curr_header)
@@ -138,7 +175,7 @@ class PEParse:
         self.mz_header = self.rawbin[:64]    
         print(f'mz_header: {self.mz_header[:32]}')
 
-        if self.mz_header[:4] != b'MZ\x90\x00':
+        if self.mz_header[:HEADER_SIG_SIZE] != b'MZ\x90\x00':
             raise PEFormatError("Invalid MZ header, file is not executable")
         
         # Jump to PE sig through IMAGE_DOS_HEADER->e_lfanew
